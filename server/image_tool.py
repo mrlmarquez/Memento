@@ -8,21 +8,17 @@ FastMCP server – vision tools (image → caption / VQA)
 # --------------------------------------------------------------------------- #
 import base64
 import io
-import os
 from typing import Optional
+from urllib.parse import urlparse
 
 import anyio
-import openai
-import requests
-from PIL import Image
-from urllib.parse import urlparse
-from openai import AsyncOpenAI              # ← new
-
-from mcp.server.fastmcp import FastMCP
-from loguru import logger
-
-
 from dotenv import load_dotenv
+from loguru import logger
+from mcp.server.fastmcp import FastMCP
+from PIL import Image
+
+from commons.llm import get_default_backend
+
 load_dotenv(".env")
 
 
@@ -95,10 +91,7 @@ class ImageAnalysisToolkit:
                 ],
             },
         ]
-        openai_client = AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL"),  # works with Azure etc.
-        )
+        openai_client = get_default_backend()
 
         try:
             logger.info("Sending image to OpenAI ChatCompletion (vision)…")
@@ -169,6 +162,7 @@ async def ask_question_about_image(
     - str: The answer to the question based on visual analysis and understanding of the image content.
     """
     return await toolkit.ask_question_about_image(image_path, question, sys_prompt)
+
 
 # --------------------------------------------------------------------------- #
 #  Entrypoint
