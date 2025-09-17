@@ -110,6 +110,17 @@ class HierarchicalClient:
     MAX_CYCLES = 3
 
     def __init__(self, meta_model: str, exec_model: str):
+        meta_model = meta_model or os.getenv("META_PLANNER_MODEL")
+        exec_model = exec_model or os.getenv("EXEC_MODEL")
+        # Validate models are provided either via CLI args or environment
+        if not meta_model:
+            raise SystemExit(
+                "Missing meta_model: set --meta_model or the META_PLANNER_MODEL env var"
+            )
+        if not exec_model:
+            raise SystemExit(
+                "Missing exec_model: set --exec_model or the EXEC_MODEL env var"
+            )
         self.meta_llm = get_default_backend(meta_model)
         self.exec_llm = get_default_backend(exec_model)
         self.sessions: Dict[str, ClientSession] = {}
@@ -249,14 +260,14 @@ def parse_args():
         "-m",
         "--meta_model",
         type=str,
-        default="lego-ai-gpt4-dev-yqfpj-gpt41-latest",
+        default=None,
         help="Meta‑planner model",
     )
     parser.add_argument(
         "-e",
         "--exec_model",
         type=str,
-        default="lego-ai-gpt4-dev-yqfpj-o3-latest",
+        default=None,
         help="Executor model",
     )
     parser.add_argument(
