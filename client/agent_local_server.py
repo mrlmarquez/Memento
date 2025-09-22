@@ -417,7 +417,7 @@ class HierarchicalClient:
         Returns:
             Final answer to the user's query
         """
-        tools_schema = await self._tools_schema()
+        # tools_schema = await self._tools_schema()
         self.shared_history = []
 
         # Initialize conversation with user query
@@ -461,7 +461,9 @@ class HierarchicalClient:
                 while True:
                     # Trim messages to fit within token limit
                     exec_msgs = trim_messages(exec_msgs, MAX_CTX, model=EXE_MODEL)
-                    exec_reply = await self.exec_llm.chat(exec_msgs, tools_schema)
+                    exec_reply = await self.exec_llm.chat(
+                        exec_msgs, self.sessions.values()
+                    )
 
                     # If executor has a direct response, use it
                     if exec_reply["content"]:

@@ -362,7 +362,7 @@ class HierarchicalClient:
 
     async def process_query(self, query: str, task_id: str) -> QueryRecord:
         self.shared_history = []
-        tools_schema = await self._tools_schema()
+        # tools_schema = await self._tools_schema()
 
         self._add_to_history("user", query)
 
@@ -413,7 +413,9 @@ class HierarchicalClient:
 
                 while True:
                     exec_msgs = trim_messages(exec_msgs, MAX_CTX)
-                    exec_reply = await self.exec_llm.chat(exec_msgs, tools_schema)
+                    exec_reply = await self.exec_llm.chat(
+                        exec_msgs, self.sessions.values()
+                    )
                     if exec_reply["content"]:
                         result_text = str(exec_reply["content"])
                         executor_trace.append(

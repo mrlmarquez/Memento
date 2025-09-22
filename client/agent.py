@@ -172,7 +172,7 @@ class HierarchicalClient:
     async def process_query(
         self, query: str, file: str, task_id: str = "interactive"
     ) -> str:
-        tools_schema = await self._tools_schema()
+        # tools_schema = await self._tools_schema()
         self.shared_history = []
         self.shared_history.append(
             {
@@ -206,7 +206,9 @@ class HierarchicalClient:
                 )
                 while True:
                     exec_msgs = trim_messages(exec_msgs, MAX_CTX, model=EXE_MODEL)
-                    exec_reply = await self.exec_llm.chat(exec_msgs, tools_schema)
+                    exec_reply = await self.exec_llm.chat(
+                        exec_msgs, self.sessions.values()
+                    )
                     if exec_reply["content"]:
                         result_text = str(exec_reply["content"])
                         self.shared_history.append(
