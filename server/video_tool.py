@@ -19,28 +19,25 @@ import tempfile
 from pathlib import Path
 from typing import List
 
+import cv2
 import ffmpeg
+import numpy as np
 import yt_dlp
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from PIL import Image
-import cv2
-import numpy as np
-from scenedetect import open_video, SceneManager
+from scenedetect import SceneManager, open_video
 from scenedetect.detectors import ContentDetector
-from openai import AsyncOpenAI              # ← new
-from dotenv import load_dotenv
 
+from commons.llm import get_default_backend
 
 load_dotenv()  # picks up OPENAI_* variables from .env if present
 
 # --------------------------------------------------------------------------- #
-#  OpenAI client (async)                                                      #
+#  LLM client (async)                                                      #
 # --------------------------------------------------------------------------- #
 
-openai_client = AsyncOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL"),  # works with Azure etc.
-)
+llm_client = get_default_backend()
 
 # --------------------------------------------------------------------------- #
 #  FastMCP instance                                                            #
@@ -53,7 +50,9 @@ mcp = FastMCP("video_tools")
 # --------------------------------------------------------------------------- #
 
 
-def _capture_screenshot(video_file: str, timestamp: float, width: int = 320) -> Image.Image:
+def _capture_screenshot(
+    video_file: str, timestamp: float, width: int = 320
+) -> Image.Image:
     out, _ = (
         ffmpeg.input(video_file, ss=timestamp)
         .filter("scale", width, -1)
@@ -76,9 +75,9 @@ def _extract_audio(video_file: str, output_format: str = "mp3") -> str:
 
 async def _transcribe_audio_async(audio_path: str) -> str:
     """Whisper transcription via AsyncOpenAI; returns '' if disabled."""
-    if not openai_client.api_key:
+    if not llm_client.api_key:
         return ""
-    rsp = await openai_client.audio.transcriptions.create(
+    rsp = await llm_client.audio.transcriptions.create(
         model="whisper-1",
         file=open(audio_path, "rb"),
     )
@@ -87,7 +86,9 @@ async def _transcribe_audio_async(audio_path: str) -> str:
 
 def _normalize(img: Image.Image, target_width: int = 512) -> Image.Image:
     w, h = img.size
-    return img.resize((target_width, int(target_width * h / w)), Image.Resampling.LANCZOS).convert("RGB")
+    return img.resize(
+        (target_width, int(target_width * h / w)), Image.Resampling.LANCZOS
+    ).convert("RGB")
 
 
 def _extract_keyframes(
@@ -136,6 +137,7 @@ def _images_to_base64(imgs: List[Image.Image]) -> List[str]:
 # --------------------------------------------------------------------------- #
 #  Tools                                                                      #
 # --------------------------------------------------------------------------- #
+
 
 @mcp.tool()
 async def download_video(url: str, download_directory: str | None = None) -> str:
@@ -221,7 +223,7 @@ async def ask_question_about_video(
     Returns:
     - str: The AI-generated answer to the question based on visual and (optional) audio analysis of the video.
     """
-    if not openai_client.api_key:
+    if not llm_client.api_key:
         return "OPENAI_API_KEY not set."
 
     frames = _extract_keyframes(video_path)
@@ -233,7 +235,9 @@ async def ask_question_about_video(
     user_message = [
         {
             "type": "text",
-            "text": VIDEO_QA_PROMPT.format(transcription=transcription, question=question),
+            "text": VIDEO_QA_PROMPT.format(
+                transcription=transcription, question=question
+            ),
         },
         *(
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b}"}}
@@ -241,7 +245,7 @@ async def ask_question_about_video(
         ),
     ]
 
-    chat = await openai_client.chat.completions.create(
+    chat = await llm_client.chat.completions.create(
         model="gemini-2.5-pro-preview-05-06",
         messages=[{"role": "user", "content": user_message}],
         max_tokens=512,

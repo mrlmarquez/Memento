@@ -176,8 +176,11 @@ JINA_API_KEY=your_jina_api_key_here
 ASSEMBLYAI_API_KEY=your_assemblyai_api_key_here
 ```
 
-**Note**: Replace `your_*_api_key_here` with your actual API keys. Some services are optional depending on which tools you plan to use.
+**Note**: 
 
+Replace `your_*_api_key_here` with your actual API keys. Some services are optional depending on which tools you plan to use.
+
+Ensure that the project root is included in your PYTHONPATH when running or debugging modules. This is required for proper resolution of local imports throughout the codebase.
 
 ### SearxNG Setup
 

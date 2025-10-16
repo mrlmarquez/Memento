@@ -1,18 +1,15 @@
-import os
 import logging
-from typing import Dict, Any, List
-from dotenv import load_dotenv
 
 import colorlog
-from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
-from openai import AsyncOpenAI
 from crawl4ai import AsyncWebCrawler
 from mcp.server.fastmcp import FastMCP
+
+from commons.llm import ChatBackend, get_default_backend
 
 # --------------------------------------------------------------------------- #
 #  Logging
 # --------------------------------------------------------------------------- #
-LOG_FORMAT = '%(log_color)s%(levelname)-8s%(reset)s %(message)s'
+LOG_FORMAT = "%(log_color)s%(levelname)-8s%(reset)s %(message)s"
 colorlog.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger("mcp.crawl_extract")
 
@@ -34,45 +31,12 @@ EXTRACTOR_SYSTEM_PROMPT = (
     "Stay grounded in the provided Markdown. Avoid fabrication."
 )
 
-# --------------------------------------------------------------------------- #
-#  Chat backend
-# --------------------------------------------------------------------------- #
-class OpenAIBackend:
-    def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
-        base_url = os.getenv("OPENAI_BASE_URL")
-        self.model = DEFAULT_MODEL  
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-    )
-    async def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        max_tokens: int = 30000,
-        temperature: float = 0.2,
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        resp = await self.client.chat.completions.create(**payload)
-        msg = resp.choices[0].message
-        return {"content": msg.content or ""}
 
 # --------------------------------------------------------------------------- #
 #  Helpers
 # --------------------------------------------------------------------------- #
 async def _extract_for_query(
-    backend: OpenAIBackend,
+    backend: ChatBackend,
     md: str,
     query: str,
     *,
@@ -81,10 +45,16 @@ async def _extract_for_query(
 ) -> str:
     messages = [
         {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
-        {"role": "user", "content": f"User Query:\n{query}\n\nPage Markdown (verbatim):\n\n{md}"},
+        {
+            "role": "user",
+            "content": f"User Query:\n{query}\n\nPage Markdown (verbatim):\n\n{md}",
+        },
     ]
-    res = await backend.chat(messages=messages, max_tokens=max_tokens, temperature=temperature)
+    res = await backend.chat(
+        messages=messages, max_tokens=max_tokens, temperature=temperature
+    )
     return (res["content"] or "").strip()
+
 
 async def _crawl_markdown(url: str) -> str:
     async with AsyncWebCrawler() as crawler:
@@ -93,6 +63,7 @@ async def _crawl_markdown(url: str) -> str:
         if not md:
             return result
         return md
+
 
 async def _crawl_and_extract(
     url: str,
@@ -104,7 +75,7 @@ async def _crawl_and_extract(
     logger.info(f"Crawling: {url}")
     md = await _crawl_markdown(url)
     logger.info(f"Markdown length: {len(md):,} characters")
-    backend = OpenAIBackend()  
+    backend = get_default_backend(model=DEFAULT_MODEL)
     return await _extract_for_query(
         backend,
         md,
@@ -113,10 +84,12 @@ async def _crawl_and_extract(
         temperature=temperature,
     )
 
+
 # --------------------------------------------------------------------------- #
 #  FastMCP server
 # --------------------------------------------------------------------------- #
 mcp = FastMCP("crawl-extract")
+
 
 @mcp.tool()
 async def crawl_extract(
@@ -155,6 +128,7 @@ async def crawl_extract(
         temperature=temperature,
         max_tokens=max_tokens,
     )
+
 
 # --------------------------------------------------------------------------- #
 #  Entrypoint

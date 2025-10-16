@@ -1,31 +1,27 @@
 from __future__ import annotations
 
-from tqdm import tqdm
 import asyncio
-import sys
 import json
+import logging
 import os
 import re
+import sys
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
+import colorlog
+import tiktoken
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from openai import AsyncOpenAI
+from tqdm import tqdm
+from transformers import AutoModel, AutoTokenizer
 
-import tiktoken
-from typing import List, Dict
+from commons.llm import get_default_backend
 
-from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
-import logging
-import colorlog
-
-from transformers import AutoTokenizer, AutoModel
-
-LOG_FORMAT = '%(log_color)s%(levelname)-8s%(reset)s %(message)s'
+LOG_FORMAT = "%(log_color)s%(levelname)-8s%(reset)s %(message)s"
 colorlog.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
@@ -34,7 +30,7 @@ EXE_MODEL = "o4-mini"
 
 JUDGE_MODEL = "gpt-4o-mini"
 
-PROMPT_TPL = '''You will be given a question and its ground truth answer list where each item can be a ground truth answer. Provided a pred_answer, you need to judge if the pred_answer correctly answers the question based on the ground truth answer list.
+PROMPT_TPL = """You will be given a question and its ground truth answer list where each item can be a ground truth answer. Provided a pred_answer, you need to judge if the pred_answer correctly answers the question based on the ground truth answer list.
 You should first give your rationale for the judgement, and then give your judgement result (i.e., correct or incorrect).
 
 Here is the criteria for the judgement:
@@ -52,7 +48,7 @@ The output should in the following json format:
   "rationale": "...",
   "judgement": "correct" | "incorrect"
 }}
-'''
+"""
 
 
 query_list: List[str] = []
@@ -60,7 +56,7 @@ ground_truth_map: Dict[str, Any] = {}
 with open("../data/deepresearcher.jsonl", "r") as f:
     for line in f:
         data = json.loads(line)
-        q = data['question']
+        q = data["question"]
         query_list.append(q)
         ground_truth_map[q] = data.get("ground_truth", None)
 
@@ -81,7 +77,7 @@ META_SYSTEM_PROMPT = (
     "You are the META-PLANNER in a hierarchical AI system. A user will ask a\n"
     "high-level question. **First**: break the problem into a *minimal sequence*\n"
     "of executable tasks. Reply ONLY in JSON with the schema:\n"
-    "{ \"plan\": [ {\"id\": INT, \"description\": STRING} … ] }\n\n"
+    '{ "plan": [ {"id": INT, "description": STRING} … ] }\n\n'
     "After each task is executed by the EXECUTOR you will receive its result.\n"
     "Please carefully consider the descriptions of the time of web pages and events in the task, and take these factors into account when planning and giving the final answer.\n"
     "If the final answer is complete, output it with the template:\n"
@@ -110,8 +106,12 @@ MEMORY_MAX_LENGTH = int(os.getenv("MEMORY_MAX_LENGTH", "256"))
 MEMORY_MAX_POS_EXAMPLES = int(os.getenv("MEMORY_MAX_POS_EXAMPLES", str(MEMORY_TOP_K)))
 MEMORY_MAX_NEG_EXAMPLES = int(os.getenv("MEMORY_MAX_NEG_EXAMPLES", str(MEMORY_TOP_K)))
 
-memo_tokenizer = AutoTokenizer.from_pretrained("princeton-nlp/sup-simcse-bert-base-uncased")
-memo_model = AutoModel.from_pretrained("princeton-nlp/sup-simcse-bert-base-uncased").to('cuda')
+memo_tokenizer = AutoTokenizer.from_pretrained(
+    "princeton-nlp/sup-simcse-bert-base-uncased"
+)
+memo_model = AutoModel.from_pretrained("princeton-nlp/sup-simcse-bert-base-uncased").to(
+    "cuda"
+)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 RETRIEVER_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "retriever"))
@@ -122,21 +122,28 @@ if AGENTFLY_DIR not in sys.path:
     sys.path.insert(0, AGENTFLY_DIR)
 
 try:
-    from memory.np_memory import load_jsonl as mem_load_jsonl, extract_pairs as mem_extract_pairs, retrieve as mem_retrieve
+    from memory.np_memory import extract_pairs as mem_extract_pairs
+    from memory.np_memory import load_jsonl as mem_load_jsonl
+    from memory.np_memory import retrieve as mem_retrieve
 except Exception as _e:
     mem_load_jsonl = mem_extract_pairs = mem_retrieve = None
     logger.warning("Memory retriever not available: %s", _e)
 
-def build_prompt_from_cases(task_text: str, retrieved_cases: list[dict] | None, original_items: list[dict] | None) -> str:
+
+def build_prompt_from_cases(
+    task_text: str,
+    retrieved_cases: list[dict] | None,
+    original_items: list[dict] | None,
+) -> str:
     positive_cases: list[dict] = []
     negative_cases: list[dict] = []
     retrieved_cases = retrieved_cases or []
     original_items = original_items or []
 
     for case in retrieved_cases:
-        li = case.get('line_index', -1)
+        li = case.get("line_index", -1)
         if 0 <= li < len(original_items):
-            reward = original_items[li].get('reward', 0)
+            reward = original_items[li].get("reward", 0)
             if reward == 1:
                 positive_cases.append(case)
             else:
@@ -150,19 +157,27 @@ def build_prompt_from_cases(task_text: str, retrieved_cases: list[dict] | None, 
         )
         for i, case in enumerate(positive_cases[:MEMORY_MAX_POS_EXAMPLES], 1):
             try:
-                plan_data = json.loads(case['plan'])
-                plan_steps = plan_data.get('plan', [])
-                plan_text = "\n".join([f"{step['id']}. {step['description']}" for step in plan_steps])
-                prompt_parts.append(f"Example {i}:\nQuestion: {case['question']}\nPlan:\n{plan_text}\n")
+                plan_data = json.loads(case["plan"])
+                plan_steps = plan_data.get("plan", [])
+                plan_text = "\n".join(
+                    [f"{step['id']}. {step['description']}" for step in plan_steps]
+                )
+                prompt_parts.append(
+                    f"Example {i}:\nQuestion: {case['question']}\nPlan:\n{plan_text}\n"
+                )
             except Exception:
-                prompt_parts.append(f"Example {i}:\nQuestion: {case.get('question','')}\nPlan: {case.get('plan','')}\n")
+                prompt_parts.append(
+                    f"Example {i}:\nQuestion: {case.get('question', '')}\nPlan: {case.get('plan', '')}\n"
+                )
 
     if negative_cases:
         prompt_parts.append(
             f"Negative Examples (reward=0) - Showing {min(len(negative_cases), MEMORY_MAX_NEG_EXAMPLES)} of {len(negative_cases)}:"
         )
         for i, case in enumerate(negative_cases[:MEMORY_MAX_NEG_EXAMPLES], 1):
-            prompt_parts.append(f"Example {i}:\nQuestion: {case.get('question','')}\nPlan: {case.get('plan','')}\n")
+            prompt_parts.append(
+                f"Example {i}:\nQuestion: {case.get('question', '')}\nPlan: {case.get('plan', '')}\n"
+            )
 
     prompt_parts.append(
         "Based on the above examples, please provide a plan for the current task. "
@@ -196,7 +211,10 @@ def _count_tokens(msg: Dict[str, str], enc) -> int:
     content = msg.get("content") or ""
     return role_tokens + len(enc.encode(content))
 
-def trim_messages(messages: List[Dict[str, str]], max_tokens: int, model="gpt-3.5-turbo"):
+
+def trim_messages(
+    messages: List[Dict[str, str]], max_tokens: int, model="gpt-3.5-turbo"
+):
     enc = tiktoken.encoding_for_model(model)
     total = sum(_count_tokens(m, enc) for m in messages) + 2
     if total <= max_tokens:
@@ -213,70 +231,6 @@ def trim_messages(messages: List[Dict[str, str]], max_tokens: int, model="gpt-3.
         kept.insert(1, msg)
         total += t
     return kept
-
-class ChatBackend:
-    async def chat(self, *_, **__) -> Dict[str, Any]:
-        raise NotImplementedError
-
-
-class OpenAIBackend(ChatBackend):
-    def __init__(self, model: str, is_azure: bool):
-        self.model = model
-        self.client = AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL"),
-        ) if not is_azure else AsyncAzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        )
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-        before_sleep=before_sleep_log(logger, logging.WARNING)
-    )
-    async def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: List[Dict[str, Any]] | None = None,
-        tool_choice: str | None = "auto",
-        max_tokens: int = 15000
-    ) -> Dict[str, Any]:
-        current_attempt = getattr(self.chat.retry.statistics, 'attempt_number', 0)
-
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = tool_choice
-
-        try:
-            resp = await self.client.chat.completions.create(**payload)
-        except Exception as e:
-            logger.error(f"OpenAI API call attempt {current_attempt} failed with error: {type(e).__name__} - {e}")
-            raise
-
-        msg = resp.choices[0].message
-        raw_calls = getattr(msg, "tool_calls", None)
-        tool_calls = None
-        if raw_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in raw_calls
-            ]
-        return {"content": msg.content, "tool_calls": tool_calls}
 
 
 @dataclass
@@ -310,27 +264,36 @@ class QueryRecord:
     executor_trace: List[ExecStep]
     tool_history: List[ToolCallRecord]
 
+
 MAX_TURNS_MEMORY = 50
 
 
 class HierarchicalClient:
     MAX_CYCLES = 3
 
-    def __init__(self, meta_model: str, exec_model: str, is_azure: bool):
-        self.meta_llm = OpenAIBackend(meta_model, is_azure)
-        self.exec_llm = OpenAIBackend(exec_model, is_azure)
+    def __init__(self, meta_model: str, exec_model: str):
+        self.meta_llm = get_default_backend(meta_model)
+        self.exec_llm = get_default_backend(exec_model)
         self.exit_stack = AsyncExitStack()
-        self.sessions: Dict[str, ClientSession] = {}
-        self.shared_history: List[Dict[str, str]] = []
-
-        self._memory_items: list[dict] = []
-        self._memory_pairs: list[tuple[str, str]] = []
+        self.sessions = {}
+        self.shared_history = []
+        self._memory_items = []
+        self._memory_pairs = []
         if mem_load_jsonl and mem_extract_pairs:
             try:
                 if os.path.exists(MEMORY_JSONL_PATH):
                     self._memory_items = mem_load_jsonl(MEMORY_JSONL_PATH) or []
-                    self._memory_pairs = mem_extract_pairs(self._memory_items, MEMORY_KEY_FIELD, MEMORY_VALUE_FIELD) or []
-                    logger.info("Loaded memory JSONL (%d items) from %s", len(self._memory_items), MEMORY_JSONL_PATH)
+                    self._memory_pairs = (
+                        mem_extract_pairs(
+                            self._memory_items, MEMORY_KEY_FIELD, MEMORY_VALUE_FIELD
+                        )
+                        or []
+                    )
+                    logger.info(
+                        "Loaded memory JSONL (%d items) from %s",
+                        len(self._memory_items),
+                        MEMORY_JSONL_PATH,
+                    )
                 else:
                     logger.warning("MEMORY_JSONL_PATH not found: %s", MEMORY_JSONL_PATH)
             except Exception as e:
@@ -354,12 +317,10 @@ class HierarchicalClient:
             logger.warning("Memory retrieve failed: %s", e)
             return None
 
-
     def _add_to_history(self, role: str, content: str):
         self.shared_history.append({"role": role, "content": content})
         if len(self.shared_history) > MAX_TURNS_MEMORY:
             self.shared_history.pop(0)
-
 
     async def connect_to_servers(self, scripts: List[str]):
         for script in scripts:
@@ -368,8 +329,12 @@ class HierarchicalClient:
                 raise ValueError("Server script must be .py or .js → " + script)
             cmd = "python" if path.suffix == ".py" else "node"
             params = StdioServerParameters(command=cmd, args=[str(path)])
-            stdio, write = await self.exit_stack.enter_async_context(stdio_client(params))
-            session = await self.exit_stack.enter_async_context(ClientSession(stdio, write))
+            stdio, write = await self.exit_stack.enter_async_context(
+                stdio_client(params)
+            )
+            session = await self.exit_stack.enter_async_context(
+                ClientSession(stdio, write)
+            )
             await session.initialize()
             for tool in (await session.list_tools()).tools:
                 if tool.name in self.sessions:
@@ -397,7 +362,7 @@ class HierarchicalClient:
 
     async def process_query(self, query: str, task_id: str) -> QueryRecord:
         self.shared_history = []
-        tools_schema = await self._tools_schema()
+        # tools_schema = await self._tools_schema()
 
         self._add_to_history("user", query)
 
@@ -406,7 +371,9 @@ class HierarchicalClient:
         if mem_prompt:
             self._add_to_history("user", mem_prompt)
 
-        planner_msgs = [{"role": "system", "content": META_SYSTEM_PROMPT}] + self.shared_history
+        planner_msgs = [
+            {"role": "system", "content": META_SYSTEM_PROMPT}
+        ] + self.shared_history
 
         meta_trace: List[MetaCycle] = []
         executor_trace: List[ExecStep] = []
@@ -417,7 +384,9 @@ class HierarchicalClient:
         for cycle in range(self.MAX_CYCLES):
             meta_reply = await self.meta_llm.chat(planner_msgs)
             meta_content = meta_reply["content"] or ""
-            meta_trace.append(MetaCycle(cycle, [m["content"] for m in planner_msgs], meta_content))
+            meta_trace.append(
+                MetaCycle(cycle, [m["content"] for m in planner_msgs], meta_content)
+            )
             self._add_to_history("assistant", meta_content)
 
             if meta_content.startswith("FINAL ANSWER:"):
@@ -437,17 +406,27 @@ class HierarchicalClient:
             for task in tasks:
                 task_desc = f"Task {task['id']}: {task['description']}"
                 exec_msgs = (
-                    [{"role": "system", "content": EXEC_SYSTEM_PROMPT}] + self.shared_history + [{"role": "user", "content": task_desc}]
+                    [{"role": "system", "content": EXEC_SYSTEM_PROMPT}]
+                    + self.shared_history
+                    + [{"role": "user", "content": task_desc}]
                 )
 
                 while True:
                     exec_msgs = trim_messages(exec_msgs, MAX_CTX)
-                    exec_reply = await self.exec_llm.chat(exec_msgs, tools_schema)
+                    exec_reply = await self.exec_llm.chat(
+                        exec_msgs, self.sessions.values()
+                    )
                     if exec_reply["content"]:
                         result_text = str(exec_reply["content"])
-                        executor_trace.append(ExecStep(task_id=task["id"], input=task_desc, output=result_text))
+                        executor_trace.append(
+                            ExecStep(
+                                task_id=task["id"], input=task_desc, output=result_text
+                            )
+                        )
                         exec_msgs.append({"role": "assistant", "content": result_text})
-                        self._add_to_history("assistant", f"Task {task['id']} result: {result_text}")
+                        self._add_to_history(
+                            "assistant", f"Task {task['id']} result: {result_text}"
+                        )
                         break
 
                     for call in exec_reply.get("tool_calls") or []:
@@ -456,15 +435,30 @@ class HierarchicalClient:
                         session = self.sessions[t_name]
                         result_msg = await session.call_tool(t_name, t_args)
                         result_text = str(result_msg.content)
-                        tool_history.append(ToolCallRecord(tool=t_name, arguments=t_args, result=result_text))
+                        tool_history.append(
+                            ToolCallRecord(
+                                tool=t_name, arguments=t_args, result=result_text
+                            )
+                        )
                         exec_msgs.extend(
                             [
-                                {"role": "assistant", "content": None, "tool_calls": [call]},
-                                {"role": "tool", "tool_call_id": call["id"], "name": t_name, "content": result_text},
+                                {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [call],
+                                },
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": call["id"],
+                                    "name": t_name,
+                                    "content": result_text,
+                                },
                             ]
                         )
 
-            planner_msgs = [{"role": "system", "content": META_SYSTEM_PROMPT}] + self.shared_history
+            planner_msgs = [
+                {"role": "system", "content": META_SYSTEM_PROMPT}
+            ] + self.shared_history
         else:
             final_answer = meta_content.strip()
 
@@ -483,10 +477,9 @@ class HierarchicalClient:
     async def cleanup(self):
         await self.exit_stack.aclose()
 
-JUDGE_CLIENT = AsyncOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL"),
-)
+
+JUDGE_CLIENT = get_default_backend()
+
 
 def _ensure_list(x: Any) -> List[str]:
     if x is None:
@@ -500,7 +493,10 @@ def _ensure_list(x: Any) -> List[str]:
     except Exception:
         return [str(x)]
 
-async def llm_judge(question: str, ground_truth: Any, pred_answer: str) -> Dict[str, Any]:
+
+async def llm_judge(
+    question: str, ground_truth: Any, pred_answer: str
+) -> Dict[str, Any]:
     gt_list = _ensure_list(ground_truth)
     prompt = PROMPT_TPL.format(
         question=question,
@@ -525,6 +521,7 @@ async def llm_judge(question: str, ground_truth: Any, pred_answer: str) -> Dict[
         logger.warning("LLM judge failed: %s", e)
         return {"judgement": "incorrect", "rationale": f"judge failed: {e}"}
 
+
 async def main():
     if not query_list:
         print("⚠️  query_list is empty – add questions to process.")
@@ -537,19 +534,20 @@ async def main():
             for line in fh:
                 try:
                     record = json.loads(line)
-                    finished_task.append(record.get('query') or record.get('question'))
+                    finished_task.append(record.get("query") or record.get("question"))
                 except Exception:
                     continue
 
     client = HierarchicalClient(
         os.getenv("META_MODEL", "gpt-4.1"),
         os.getenv("EXEC_MODEL", "o4-mini"),
-        os.getenv("USE_AZURE_OPENAI") == "True",
     )
     await client.connect_to_servers(server_paths)
 
     try:
-        for task_id, q in enumerate(tqdm(query_list, total=len(query_list), desc="Processing"), start=0):
+        for task_id, q in enumerate(
+            tqdm(query_list, total=len(query_list), desc="Processing"), start=0
+        ):
             if q in finished_task:
                 print(f"Task {q} already finished, skipping...")
                 continue
@@ -564,15 +562,17 @@ async def main():
                 reward = 1 if judge_res["judgement"] == "correct" else 0
 
                 rec_dict = asdict(rec)
-                rec_dict.update({
-                    "question": q,
-                    "plan": rec.plan_json,
-                    "ground_truth": gt,
-                    "pred_answer": pred_answer,
-                    "judgement": judge_res["judgement"],
-                    "rationale": judge_res["rationale"],
-                    "reward": reward,
-                })
+                rec_dict.update(
+                    {
+                        "question": q,
+                        "plan": rec.plan_json,
+                        "ground_truth": gt,
+                        "pred_answer": pred_answer,
+                        "judgement": judge_res["judgement"],
+                        "rationale": judge_res["rationale"],
+                        "reward": reward,
+                    }
+                )
 
                 print("\nFINAL ANSWER:", rec.model_output)
                 with open(result_path, "a", encoding="utf-8") as fh:
@@ -590,24 +590,16 @@ async def main():
                 mem_entry = {
                     "question": q,
                     "plan": rec.plan_json or "",
-                    "reward": reward
+                    "reward": reward,
                 }
                 with open(mem_path, "a", encoding="utf-8") as mf:
                     mf.write(json.dumps(mem_entry, ensure_ascii=False) + "\n")
-
-
-                if mem_load_jsonl and mem_extract_pairs:
-                    client._memory_items = mem_load_jsonl(mem_path)
-                    client._memory_pairs = mem_extract_pairs(
-                        client._memory_items,
-                        MEMORY_KEY_FIELD,
-                        MEMORY_VALUE_FIELD
-                    )
             except Exception as e:
                 logger.warning("Failed to write memory file: %s", e)
 
     finally:
         await client.cleanup()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
